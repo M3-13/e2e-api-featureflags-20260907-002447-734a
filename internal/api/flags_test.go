@@ -140,6 +140,26 @@ func TestCreateFlagBodyTooLarge(t *testing.T) {
 	}
 }
 
+func TestCreateFlagLimit(t *testing.T) {
+	original := store.MaxFlags
+	store.MaxFlags = 1
+	defer func() { store.MaxFlags = original }()
+
+	h := newTestHandlers()
+
+	if w := doRequest(h, http.MethodPost, "/flags", `{"key":"one","enabled":true}`); w.Code != http.StatusCreated {
+		t.Fatalf("first create status = %d, want %d; body=%s", w.Code, http.StatusCreated, w.Body.String())
+	}
+
+	w := doRequest(h, http.MethodPost, "/flags", `{"key":"two","enabled":true}`)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("limit status = %d, want %d; body=%s", w.Code, http.StatusTooManyRequests, w.Body.String())
+	}
+	if decodeError(t, w.Body.Bytes()) == "" {
+		t.Fatalf("expected JSON error object, got %s", w.Body.String())
+	}
+}
+
 func TestListFlagsEmpty(t *testing.T) {
 	h := newTestHandlers()
 	w := doRequest(h, http.MethodGet, "/flags", "")
@@ -194,6 +214,17 @@ func TestGetFlag(t *testing.T) {
 	}
 }
 
+func TestGetFlagInvalidKey(t *testing.T) {
+	h := newTestHandlers()
+	w := doRequest(h, http.MethodGet, "/flags/bad!key", "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	if decodeError(t, w.Body.Bytes()) == "" {
+		t.Fatalf("expected JSON error object, got %s", w.Body.String())
+	}
+}
+
 func TestGetFlagNotFound(t *testing.T) {
 	h := newTestHandlers()
 	w := doRequest(h, http.MethodGet, "/flags/nope", "")
@@ -225,6 +256,17 @@ func TestUpdateFlagNotFound(t *testing.T) {
 	w := doRequest(h, http.MethodPut, "/flags/nope", `{"enabled":true}`)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	if decodeError(t, w.Body.Bytes()) == "" {
+		t.Fatalf("expected JSON error object, got %s", w.Body.String())
+	}
+}
+
+func TestUpdateFlagInvalidKey(t *testing.T) {
+	h := newTestHandlers()
+	w := doRequest(h, http.MethodPut, "/flags/bad!key", `{"enabled":true}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
 	}
 	if decodeError(t, w.Body.Bytes()) == "" {
 		t.Fatalf("expected JSON error object, got %s", w.Body.String())
@@ -272,6 +314,17 @@ func TestDeleteFlagNotFound(t *testing.T) {
 	w := doRequest(h, http.MethodDelete, "/flags/nope", "")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusNotFound, w.Body.String())
+	}
+	if decodeError(t, w.Body.Bytes()) == "" {
+		t.Fatalf("expected JSON error object, got %s", w.Body.String())
+	}
+}
+
+func TestDeleteFlagInvalidKey(t *testing.T) {
+	h := newTestHandlers()
+	w := doRequest(h, http.MethodDelete, "/flags/bad!key", "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
 	}
 	if decodeError(t, w.Body.Bytes()) == "" {
 		t.Fatalf("expected JSON error object, got %s", w.Body.String())
