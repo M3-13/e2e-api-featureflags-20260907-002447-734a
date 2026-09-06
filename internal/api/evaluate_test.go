@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,11 +12,10 @@ import (
 func evaluateRequest(t *testing.T, key, user string, setUser bool) *httptest.ResponseRecorder {
 	t.Helper()
 	h := NewHandlers(store.NewStore())
-	url := "/flags/" + key + "/evaluate"
+	req := httptest.NewRequest(http.MethodGet, "/flags/"+key+"/evaluate", nil)
 	if setUser {
-		url += "?user=" + user
+		req.Header.Set("X-User-ID", user)
 	}
-	req := httptest.NewRequest(http.MethodGet, url, nil)
 	req.SetPathValue("key", key)
 	rec := httptest.NewRecorder()
 	h.EvaluateFlag(rec, req)
@@ -36,10 +36,43 @@ func TestEvaluateFlagEmptyUser(t *testing.T) {
 	}
 }
 
+func TestEvaluateFlagInvalidKey(t *testing.T) {
+	rec := evaluateRequest(t, "bad@key", "user-1", true)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid key, got %d", rec.Code)
+	}
+}
+
 func TestEvaluateFlagUnknownFlag(t *testing.T) {
 	rec := evaluateRequest(t, "unknown", "user-1", true)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown flag, got %d", rec.Code)
+	}
+}
+
+func TestEvaluateFlagEnabled(t *testing.T) {
+	s := store.NewStore()
+	if err := s.Create(store.Flag{Key: "enabled", Enabled: true, RolloutPercent: 100}); err != nil {
+		t.Fatalf("create flag: %v", err)
+	}
+	h := NewHandlers(s)
+	req := httptest.NewRequest(http.MethodGet, "/flags/enabled/evaluate", nil)
+	req.Header.Set("X-User-ID", "user-1")
+	req.SetPathValue("key", "enabled")
+	rec := httptest.NewRecorder()
+	h.EvaluateFlag(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var result struct {
+		Result bool `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("response is not valid JSON: %v (%s)", err, rec.Body.String())
+	}
+	if !result.Result {
+		t.Fatalf("enabled flag with rollout 100 must evaluate to true")
 	}
 }
 

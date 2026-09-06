@@ -9,9 +9,13 @@ import (
 
 func (h *Handlers) EvaluateFlag(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	user := r.URL.Query().Get("user")
+	user := r.Header.Get("X-User-ID")
 	if user == "" {
 		writeError(w, http.StatusBadRequest, "user is required")
+		return
+	}
+	if !validKey(key) {
+		writeError(w, http.StatusBadRequest, "key may only contain [A-Za-z0-9._-]")
 		return
 	}
 
