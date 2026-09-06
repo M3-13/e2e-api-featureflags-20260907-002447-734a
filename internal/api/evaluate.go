@@ -1,7 +1,35 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
+
+	"featureflagservice/internal/evaluate"
+	"featureflagservice/internal/store"
+)
 
 func (h *Handlers) EvaluateFlag(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	key := r.PathValue("key")
+	user := r.URL.Query().Get("user")
+	if user == "" {
+		writeError(w, http.StatusBadRequest, "user is required")
+		return
+	}
+
+	flag, ok := h.store.Get(key)
+	if !ok {
+		writeError(w, http.StatusNotFound, "flag not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]bool{"result": evaluateFlag(flag, user)})
+}
+
+// evaluateFlag resolves the rollout decision for a single flag and user,
+// independent of the store. A disabled flag is always false; otherwise the
+// deterministic rollout hash decides.
+func evaluateFlag(flag store.Flag, user string) bool {
+	if !flag.Enabled {
+		return false
+	}
+	return evaluate.Decide(flag.Key, user, flag.RolloutPercent)
 }
