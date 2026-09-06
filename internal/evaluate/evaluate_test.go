@@ -50,3 +50,20 @@ func TestDecideBounds(t *testing.T) {
 		_ = v // must not panic; value itself depends on the hash bucket
 	}
 }
+
+func TestHashInputDistinguishesAmbiguousPairs(t *testing.T) {
+	// key="a", user="b:c" and key="a:b", user="c" previously produced the same
+	// concatenation ("a:b:c") and therefore the same hash. The length-prefixed
+	// serialization must keep them apart.
+	a := hashInput("a", "b:c")
+	b := hashInput("a:b", "c")
+	if a == b {
+		t.Fatalf("hash inputs collide: %q and %q both serialize to %q", "a", "a:b", a)
+	}
+}
+
+func TestHashInputStable(t *testing.T) {
+	if hashInput("feature", "user-1") != hashInput("feature", "user-1") {
+		t.Fatal("hashInput must be deterministic")
+	}
+}
