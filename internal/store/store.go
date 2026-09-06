@@ -2,13 +2,32 @@ package store
 
 import (
 	"errors"
+	"os"
 	"sort"
+	"strconv"
 	"sync"
 )
 
 var ErrKeyExists = errors.New("key already exists")
 
 var ErrNotFound = errors.New("flag not found")
+
+var ErrFlagLimit = errors.New("flag limit reached")
+
+// MaxFlags caps the number of flags the store will hold. It defaults to 1000
+// and can be overridden with the MAX_FLAGS environment variable.
+var MaxFlags = maxFlagsFromEnv()
+
+func maxFlagsFromEnv() int {
+	v := os.Getenv("MAX_FLAGS")
+	if v == "" {
+		return 1000
+	}
+	if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		return n
+	}
+	return 1000
+}
 
 type Flag struct {
 	Key            string `json:"key"`
@@ -40,6 +59,10 @@ func (s *Store) Create(f Flag) error {
 
 	if _, exists := s.flags[f.Key]; exists {
 		return ErrKeyExists
+	}
+
+	if len(s.flags) >= MaxFlags {
+		return ErrFlagLimit
 	}
 
 	s.flags[f.Key] = f

@@ -36,6 +36,29 @@ func TestCreateDuplicateKey(t *testing.T) {
 	}
 }
 
+func TestCreateLimit(t *testing.T) {
+	original := MaxFlags
+	MaxFlags = 2
+	defer func() { MaxFlags = original }()
+
+	s := NewStore()
+
+	if err := s.Create(Flag{Key: "a"}); err != nil {
+		t.Fatalf("first Create returned error: %v", err)
+	}
+	if err := s.Create(Flag{Key: "b"}); err != nil {
+		t.Fatalf("second Create returned error: %v", err)
+	}
+
+	if err := s.Create(Flag{Key: "c"}); !errors.Is(err, ErrFlagLimit) {
+		t.Fatalf("third Create error = %v, want ErrFlagLimit", err)
+	}
+
+	if _, ok := s.Get("c"); ok {
+		t.Fatal("flag inserted despite limit")
+	}
+}
+
 func TestGetUnknownKey(t *testing.T) {
 	s := NewStore()
 

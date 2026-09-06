@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"regexp"
 
@@ -50,6 +51,10 @@ func (h *Handlers) CreateFlag(w http.ResponseWriter, r *http.Request) {
 		RolloutPercent: rollout,
 	}
 	if err := h.store.Create(flag); err != nil {
+		if errors.Is(err, store.ErrFlagLimit) {
+			writeError(w, http.StatusTooManyRequests, "flag limit reached")
+			return
+		}
 		writeError(w, http.StatusConflict, "flag already exists")
 		return
 	}
@@ -66,6 +71,10 @@ func (h *Handlers) ListFlags(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) GetFlag(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
+	if !validKey(key) {
+		writeError(w, http.StatusBadRequest, "key may only contain [A-Za-z0-9._-]")
+		return
+	}
 	flag, ok := h.store.Get(key)
 	if !ok {
 		writeError(w, http.StatusNotFound, "flag not found")
@@ -76,6 +85,10 @@ func (h *Handlers) GetFlag(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) UpdateFlag(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
+	if !validKey(key) {
+		writeError(w, http.StatusBadRequest, "key may only contain [A-Za-z0-9._-]")
+		return
+	}
 	var body struct {
 		Enabled        *bool  `json:"enabled"`
 		Description    string `json:"description"`
@@ -111,6 +124,10 @@ func (h *Handlers) UpdateFlag(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) DeleteFlag(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
+	if !validKey(key) {
+		writeError(w, http.StatusBadRequest, "key may only contain [A-Za-z0-9._-]")
+		return
+	}
 	if h.store.Delete(key) {
 		w.WriteHeader(http.StatusNoContent)
 		return
