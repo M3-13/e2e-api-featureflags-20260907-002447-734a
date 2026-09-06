@@ -1,72 +1,52 @@
-VERDICT: BLOCKED
+VERDICT: CHANGES_REQUESTED
 
-## Sicherheitsbericht
+Bei der Prüfung des vollständig zusammengeführten Produkts wurden die Bereiche Secrets, Injection/Inputvalidation, AuthN/AuthZ, Dependencies sowie Konfiguration/Transport bewertet. Es wurden keine kritischen oder hohen Schwachstellen wie hartkodierte Geheimnisse, SQL-/Command-Injection, Auth-Bypass oder PII-Leaks festgestellt. Allerdings bestehen mittlere und niedrige Härtungslücken, die vor einem Produktivbetrieb behoben werden sollten.
 
-**Hinweis zu Scanner-Befunden:** Es wurden keine Security-Scanner-Ergebnisse geliefert (kein Bandit, pip-audit, npm audit oder Semgrep). Das Fehlen von Scanner-Output ist kein Befund; die folgende Bewertung beruht auf manueller Code-Analyse.
+## Sicherheitsbefunde
 
-### 1. Fehlende Authentifizierung und Autorisierung für alle API-Endpunkte
-- **Schweregrad:** Kritisch
-- **Betroffene Stelle:** `main.go` (`newHandler`, Routing) sowie alle Handler in `internal/api/`
-- **Beschreibung:** Die REST-API ist vollständig offen. Es gibt weder eine API-Key-/Bearer-Token-Prüfung noch Basic Auth oder mTLS. Jeder Client, der den Server-Port erreicht, kann Feature-Flags anlegen (`POST /flags`), ändern (`PUT /flags/{key}`), löschen (`DELETE /flags/{key}`) und auswerten (`GET /flags/{key}/evaluate`). Ein Angreifer kann das Verhalten der gesteuerten Anwendung manipulieren, z. B. ein Kill-Switch aktivieren oder Rollout-Prozentsätze ändern.
-- **Angriffsbeispiel:**
+### 1. Transportverschlüsselung fehlt (mittel)
+- **Betroffene Stelle:** `main.go`, insbesondere `newServer` und der Aufruf `ListenAndServe` in `main()`.
+- **Risiko:** Der Server spricht ausschließlich unverschlüsseltes HTTP. Wird der Dienst über `ADDR` auf eine Netzwerkschnittstelle (z. B. `0.0.0.0:8080`) exponiert, kann das über `Authorization: Bearer …` übertragene `FLAG_API_TOKEN` von Angreifern im Netzwerk abgehört und anschließend für unbefugte API-Zugriffe verwendet werden. Der Standardwert `127.0.0.1:8080` bindet zwar lokal, aber die Konfiguration über Umgebungsvariablen erlaubt eine unsichere Exposition.
+- **Konkreter Fix:** TLS-Support ergänzen und bei Vorhandensein von Zertifikat/Key `ListenAndServeTLS` verwenden. Beispiel:
+  ```go
+  certFile := os.Getenv("TLS_CERT_FILE")
+  keyFile := os.Getenv("TLS_KEY_FILE")
+  if certFile != "" && keyFile != "" {
+      err = srv.ListenAndServeTLS(certFile, keyFile)
+  } else {
+      err = srv.ListenAndServe()
+  }
   ```
-  curl -X POST http://<host>:8080/flags \
-       -H 'Content-Type: application/json' \
-       -d '{"key":"critical","enabled":true,"rollout_percent":100}'
+  Zusätzlich in `README.md`/`SECURITY.md` klarstellen, dass der Dienst ausschließlich hinter einem TLS-terminierenden Reverse-Proxy betrieben werden darf, falls keine eigenen Zertifikate konfiguriert sind.
+
+### 2. Nicht-konstanter Token-Vergleich (niedrig)
+- **Betroffene Stelle:** `internal/middleware/auth.go`, Zeile `strings.TrimPrefix(auth, prefix) != token`.
+- **Risiko:** Der String-Vergleich ist nicht zeitkonstant und kann theoretisch über einen Timing-Seitenkanal genutzt werden, um das geheime Token byteweise zu erraten. In der Praxis ist das Risiko bei einem zufälligen, langen Token gering, die Härtung ist jedoch trivial.
+- **Konkreter Fix:** `crypto/subtle.ConstantTimeCompare` verwenden:
+  ```go
+  import "crypto/subtle"
+  ...
+  trimmed := strings.TrimPrefix(auth, prefix)
+  if len(trimmed) != len(token) || subtle.ConstantTimeCompare([]byte(trimmed), []byte(token)) != 1 {
+      unauthorized(w)
+      return
+  }
   ```
-  Oder:
-  ```
-  curl -X DELETE http://<host>:8080/flags/critical
-  ```
-- **Fix:**
-  - Eine Authentifizierungs-Middleware vor die API schalten, die z. B. einen konfigurierbaren Bearer-Token prüft:
-    ```go
-    func Auth(requiredToken string, next http.Handler) http.Handler { ... }
-    ```
-  - Den Token aus `os.Getenv("FLAG_API_TOKEN")` beziehen und im Fehlerfall `401` mit JSON-Fehlerobjekt zurückgeben.
-  - Für Schreib-/Lese-Trennung optional eine rollenbasierte Berechtigung (z. B. nur Lesezugriff ohne Token für `GET /healthz`, voller Zugriff nur mit gültigem Token).
-  - Tests entsprechend erweitern (`main_test.go`, Handler-Tests).
 
-### 2. Transportverschlüsselung fehlt (HTTP statt HTTPS)
-- **Schweregrad:** Mittel
-- **Betroffene Stelle:** `main.go` (`newServer`, `ListenAndServe`)
-- **Beschreibung:** Der Server bindet standardmäßig an `:8080` und verwendet keine TLS-Verschlüsselung. Die `user`-ID wird bei `GET /flags/{key}/evaluate?user=…` als Query-Parameter übertragen. Ohne TLS können Nutzer-IDs und Flag-Beschreibungen im Klartext abgefangen werden, sofern der Dienst nicht durch einen TLS-terminierenden Reverse-Proxy geschützt wird.
-- **Fix:**
-  - Entweder TLS direkt im Server aktivieren (`ListenAndServeTLS`) und Zertifikate konfigurieren, oder
-  - im Deployment ausdrücklich vorsehen, dass der Service ausschließlich hinter einem TLS-Reverse-Proxy läuft (z. B. `ADDR` auf `127.0.0.1:8080` binden und Proxy auf `localhost`).
-  - Empfehlung: Standardbindung auf Loopback (`127.0.0.1:8080`), um versehentliche öffentliche Exposition zu vermeiden.
+### 3. Keine Ratenbegrenzung auf geschützten Endpunkten (niedrig)
+- **Betroffene Stelle:** `main.go` / `newHandler`, alle mit `middleware.Auth` geschützten Routen unter `/flags`.
+- **Risiko:** Ein Angreifer kann unbegrenzt viele Authentifizierungsversuche oder gültige `POST`/`GET`-Anfragen senden. Dies ermöglicht Brute-Force-Angriffe auf den Token sowie einfache DoS-Angriffe auf den In-Memory-Store (z. B. durch massenhaftes Anlegen von Flags, sofern der Token bekannt ist).
+- **Konkreter Fix:** Eine einfache Rate-Limit-Middleware vor `middleware.Auth` schalten, die z. B. pro IP-Subnetz oder anhand des `Authorization`-Headers Fehlversuche und Request-Raten begrenzt. Beispiel-Implementierung mit Token-Bucket oder einem groben Zähler pro Minute; bei Überschreitung `429 Too Many Requests` im JSON-Fehlerformat zurückgeben.
 
-### 3. Pfadparameter `{key}` wird außerhalb des POST-/PUT-Pfads nicht auf gültige Zeichen geprüft
-- **Schweregrad:** Niedrig
-- **Betroffene Stellen:** `internal/api/evaluate.go`, `internal/api/flags.go` (`GetFlag`, `UpdateFlag`, `DeleteFlag`)
-- **Beschreibung:** `validKey` wird nur beim Anlegen (`CreateFlag`) angewendet. Die Schlüssel aus `r.PathValue("key")` in `GET`, `PUT`, `DELETE` und `evaluate` werden ungeprüft an den Store übergeben. Da im Store durch den Create-Pfad keine ungültigen Keys entstehen können, ist das aktuell nicht direkt ausnutzbar. Allerdings ist es inkonsistent und kann bei späteren Erweiterungen oder durch Pfadnormalisierungen (`/flags/..`) zu Problemen führen.
-- **Fix:**
-  - `validKey` auch in diesen Handlern anwenden und bei ungültigem Key `400` mit JSON-Fehlerobjekt zurückgeben, statt den Store zu konsultieren.
+## Geprüfte Bereiche ohne Befund
 
-### 4. Hash-Kollision durch ungeschützte String-Konkatenation in der Rollout-Entscheidung
-- **Schweregrad:** Niedrig
-- **Betroffene Stellen:** `internal/evaluate/evaluate.go` (`Decide`), `internal/api/evaluate.go` (`evaluateFlag`)
-- **Beschreibung:** Die Hash-Eingabe wird als `key + ":" + user` gebildet. Da `user` beliebige Zeichen enthalten darf, können verschiedene Paare dieselbe Eingabe erzeugen, z. B. `key="a", user="b:c"` und `key="a:b", user="c"`. Das führt zu identischen Rollout-Entscheidungen für unterschiedliche logische Paare. Es handelt sich nicht um einen direkten Sicherheitsangriff, aber um eine Schwäche in der Verteilungslogik.
-- **Fix:**
-  - Eine eindeutige Serialisierung verwenden, z. B. Längenpräfixe:
-    ```go
-    fmt.Sprintf("%d:%s:%d:%s", len(key), key, len(user), user)
-    ```
-  - Alternativ `encoding/json` auf eine kleine Struct anwenden.
-
-### 5. Unbegrenztes Speicherwachstum des In-Memory-Stores
-- **Schweregrad:** Niedrig
-- **Betroffene Stelle:** `internal/store/store.go`
-- **Beschreibung:** Der Store hält alle Flags unbegrenzt im Speicher; es gibt keine Maximalzahl oder Quota. In Verbindung mit der fehlenden Authentifizierung (Finding 1) kann ein Angreifer beliebig viele Flags anlegen und so Speicher und CPU belasten. Nach Einführung der Auth sollte zusätzlich ein Limit oder ein Rate-Limit erwogen werden.
-- **Fix:**
-  - Maximalanzahl von Flags konfigurierbar machen (z. B. 1000) und bei Überschreitung `409` oder `429` zurückgeben.
-  - Optional ein Request-Rate-Limit in der Middleware.
-
-## Weitere Beobachtungen
-- **Dependencies:** `go.mod` enthält laut Projektdatei nur Modul- und Go-Version; keine externen Abhängigkeiten und damit keine bekannten Schwachstellen durch Pakete. Kein Handlungsbedarf.
-- **RequestBody-Limit:** `http.MaxBytesReader` in `decodeJSON` begrenzt POST/PUT korrekt auf 1 MiB und liefert `413`. Das ist sauber implementiert.
-- **Logging:** Die Middleware protokolliert ausschließlich Methode, Pfad ohne Query und Statuscode. Es werden keine `user`-IDs oder Request-Bodys geloggt. Das entspricht AC-16/AC-17.
-- **Server-Timeout-Konfiguration:** `ReadTimeout`, `ReadHeaderTimeout`, `WriteTimeout`, `IdleTimeout` sind gesetzt und mindern Slowloris-Angriffe.
+- **Secrets:** Keine hartkodierten Token, Passwörter oder URLs im sichtbaren Code. `FLAG_API_TOKEN` wird nur aus der Umgebung gelesen und nicht protokolliert.
+- **Injection/Inputs:** Keine SQL-/Command-/Path-Injection. Flag-Keys werden strikt mit Regex `[A-Za-z0-9._-]` validiert. Request-Bodies werden über `http.MaxBytesReader` auf 1 MiB begrenzt; Überschreitungen führen zu 413. JSON-Ausgaben werden korrekt mit `Content-Type: application/json` erzeugt.
+- **AuthN/AuthZ:** Alle `/flags`-Routen sind durch die `Auth`-Middleware mit Bearer-Token geschützt. Leeres Token führt zu Fail-Closed (401). `GET /healthz` bleibt bewusst offen und liefert keinen sensiblen Inhalt.
+- **Logging/Datenschutz:** Die Logging-Middleware protokolliert nur Methode, `r.URL.Path` (ohne Query-String) und Statuscode. Query-Parameter und User-IDs werden nicht ausgegeben, der `X-User-ID`-Header wird ebenfalls nicht geloggt.
+- **Dependencies:** Es werden keine externen Pakete verwendet; der Dienst basiert ausschließlich auf der Go-Standardbibliothek. Es liegen keine Scanner-Meldungen zu bekannten Schwachstellen vor.
+- **Konfiguration:** Server-Timeouts (`ReadTimeout`, `ReadHeaderTimeout`, `WriteTimeout`, `IdleTimeout`) sind gesetzt. Standard-Bind-Adresse ist sicher (`127.0.0.1:8080`). `MAX_FLAGS` begrenzt die Anzahl speicherbarer Flags.
 
 ## Fazit
-Der Code ist in sich konsistent und erfüllt viele geforderte Sicherheitsaspekte (Timeout, Body-Limit, Key-Validierung beim Create, datenschutzfreundliches Logging). Der **kritische Mangel ist die vollständig fehlende Authentifizierung/Autorisierung**, die es jedem Netzwerkteilnehmer erlaubt, Feature-Flags zu manipulieren. Dies ist für ein Produkt, das Anwendungsverhalten steuert, nicht akzeptabel. Zudem sollte die Transportverschlüsselung sichergestellt werden. Daher wird das Produkt aktuell **blockiert**.
+
+Das Produkt ist grundsätzlich sauber implementiert und erfüllt die wesentlichen Sicherheitsanforderungen. Vor einem Einsatz außerhalb einer rein lokalen Umgebung sollten jedoch mindestens die TLS-Absicherung (Befund 1) und idealerweise die Ratenbegrenzung (Befund 3) umgesetzt werden. Der nicht-konstante Token-Vergleich ist eine einfache Härtungsmaßnahme mit geringem Aufwand.
