@@ -1,120 +1,153 @@
 VERDICT: CHANGES_REQUESTED
 
-## Prüfgegenstand
+## Gesamtbewertung
 
-Geprüft wurde der im Projektstand sichtbare Go-Backend-Dienst `featureflagservice` (REST-API, Standardbibliothek `net/http`, In-Memory-Store, Logging-Middleware, Tests). Reine Backend-Komponente ohne Endnutzer-UI. Relevante Vorschriften: DSGVO, EU Cyber Resilience Act (CRA). EU AI Act, Impressum/Datenschutzerklärung/Cookie-Pflichten und Barrierefreiheit sind nach dem vorliegenden Projekttyp nicht anwendbar.
-
----
-
-## 1. DSGVO
-
-### DSGVO-1: Nutzer-ID wird als Query-Parameter übertragen
-**Schweregrad:** medium
-
-**Datei:** `internal/api/evaluate.go`
-
-`GET /flags/{key}/evaluate?user={id}` liest die Nutzer-ID aus dem Query-String. Die eigene Logging-Middleware protokolliert zwar ausdrücklich nur `r.URL.Path` und damit keine Query-Parameter (`internal/middleware/logging.go`; Tests bestätigen das). Das erfüllt AC-16/AC-17 im Produkt selbst.
-
-Dennoch verbleibt ein Risiko: Die Nutzer-ID als personenbezogenes Datum steht in der URL und kann in vorgelagerten Systemen (Reverse-Proxy, Load Balancer, CDN, Browser-History, serverseitige Access-Logs Dritter) gespeichert werden. Das betrifft Datenschutz durch Technikgestaltung nach Art. 25 DSGVO.
-
-**Konkrete Abhilfe:**  
-Den Evaluate-Endpunkt so ändern, dass die Nutzer-ID nicht im Query-String, sondern in einem Request-Header (z. B. `X-User-ID`) oder in einem POST-Body übertragen wird. Dazu `internal/api/evaluate.go` anpassen und `internal/api/evaluate_test.go` entsprechend umbauen. Falls der Query-Parameter beibehalten werden muss, muss in der Betriebsdokumentation verbindlich festgelegt werden, dass vorgelagerte Systeme Query-Strings nicht loggen dürfen; zusätzlich sollte die App dann prüfen, dass nur HTTPS verwendet wird.
+Der vorgelegte Stand ist ein solides, datenschutzbewusstes Go-Backend: Es gibt keine Persistenz personenbezogener Daten, das Logging verzichtet auf Query-Strings und Nutzer-IDs, der Server setzt Timeouts, Body-Limits und eine Fail-closed-Authentifizierung. Es bestehen jedoch behebbare Lücken bei Transportverschlüsselung, Datenschutzdokumentation, CRA-Nachweisen (SBOM/Update-Prozess), einem nicht konstantzeitigen Token-Vergleich und einer Abweichung von AC-08. Kein fundamentaler, nicht behebbarer Verstoß — daher `CHANGES_REQUESTED`.
 
 ---
 
-### DSGVO-2: Rechtsgrundlage und Datenschutzdokumentation nicht sichtbar
-**Schweregrad:** medium
+## 1. GDPR / Datenschutz
 
-**Datei:** `README.md`
+### Befund 1.1 — Fehlende Transportverschlüsselung (TLS)
+- **Schwere:** hoch
+- **Fundstelle:** `main.go`, `newServer()` / `main()`: Es wird ausschließlich `ListenAndServe()` ohne TLS-Konfiguration verwendet. Der Dienst verarbeitet `X-User-ID` (personenbezogenes Datum) und einen `FLAG_API_TOKEN` (Zugangsgeheimnis). Wird `ADDR` auf eine öffentliche Schnittstelle gesetzt, erfolgt die Übertragung im Klartext.
+- **Begründung:** Art. 32 DSGVO verlangt geeignete technische und organisatorische Maßnahmen, einschließlich Verschlüsselung bei Übertragung personenbezogener Daten. Bearer-Token und Nutzer-IDs sind schützenswert.
+- **Maßnahme (konkret):**
+  - In `main.go` Umgebungsvariablen `TLS_CERT_FILE` und `TLS_KEY_FILE` einführen.
+  - Wenn beide gesetzt sind: `srv.ListenAndServeTLS(tlsCertFile, tlsKeyFile)` verwenden.
+  - Zusätzlich in `README.md` / `SECURITY.md` verbindlich dokumentieren: „Der Dienst darf ohne TLS nur auf `127.0.0.1` betrieben werden. Bei Betrieb hinter einem TLS-terminierenden Reverse Proxy muss die Weiterleitung ausschließlich über HTTPS erfolgen.“
+  - Optional: `TLSConfig` mit mindestens TLS 1.2 und sicheren Cipher-Suiten setzen.
 
-Die App verarbeitet mit `user` eine potenziell personenbezogene Kennung. Der Code speichert sie nicht persistent und protokolliert sie nicht. Trotzdem muss der Verantwortliche für diese Verarbeitung eine Rechtsgrundlage nach Art. 6 DSGVO benennen können und die Verarbeitung dokumentieren. Im sichtbaren Stand fehlt eine solche Dokumentation.
+### Befund 1.2 — Rechtsgrundlage und Datenschutzdokumentation nicht sichtbar
+- **Schwere:** mittel
+- **Fundstelle:** `internal/api/evaluate.go` verarbeitet `X-User-ID`; `README.md`, `COMPLIANCE.md` und `SECURITY.md` sind vorhanden, ihre Inhalte sind aber nicht Teil des sichtbaren Standes. Eine Datenschutz-/Verarbeitungsdokumentation ist im Code nicht erkennbar.
+- **Begründung:** Die Verarbeitung der Nutzer-ID zur Feature-Auswertung benötigt eine dokumentierte Rechtsgrundlage (je nach Einsatz Art. 6 Abs. 1 lit. b DSGVO bei Vertragserfüllung oder lit. f DSGVO bei berechtigtem Interesse). Betreiber und ggf. Auftragsverarbeiter müssen die Verarbeitung nachweisen können.
+- **Maßnahme (konkret):**
+  - In `README.md` oder `COMPLIANCE.md` einen Abschnitt „Datenschutz“ ergänzen mit:
+    - Verarbeitete Daten: `X-User-ID` (transient), `Authorization`-Header (nur für Authentifizierung), keine IP-Adresse in Access-Logs.
+    - Zweck: deterministische Feature-Flag-Auswertung.
+    - Rechtsgrundlage: Art. 6 Abs. 1 lit. b DSGVO (Vertragserfüllung) bzw. lit. f DSGVO (berechtigtes Interesse), je nach Bereitstellungsmodell.
+    - Speicherdauer: keine dauerhafte Speicherung; nur flüchtige In-Memory-Berechnung.
+    - Betroffenenrechte: Da keine Speicherung erfolgt, entfallen Lösch-/Auskunftspflichten; Hinweis auf vorgelagertes TLS.
+    - Auftragsverarbeitung: Wenn der Service als Auftragsverarbeiter betrieben wird, muss ein AV-Vertrag geschlossen werden.
 
-**Konkrete Abhilfe:**  
-In `README.md` einen Abschnitt „Datenschutz & Rechtsgrundlage“ ergänzen. Dort ausdrücklich festhalten:
+### Befund 1.3 — API-Vertrag für `user` widerspricht AC-08 (und hat Datenschutzbezug)
+- **Schwere:** hoch (Marktreife/AC-Konformität)
+- **Fundstelle:** `internal/api/evaluate.go` liest `user` ausschließlich aus dem Header `X-User-ID`. Die Sprint-Spec AC-08 verlangt jedoch `GET /flags/{key}/evaluate?user={id}` per Query-Parameter.
+- **Begründung:** Ein Client, der die Spec befolgt, erhält `400 {"error":"user is required"}`. Das Produkt erfüllt damit ein zentrales Abnahmekriterium nicht. Datenschutzrechtlich ist der Header die besser geschützte Variante, aber die API muss den vereinbarten Vertrag erfüllen.
+- **Maßnahme (konkret):**
+  - In `internal/api/evaluate.go` zuerst `r.URL.Query().Get("user")` auswerten, bei leerem Wert auf `r.Header.Get("X-User-ID")` zurückfallen:
+    ```go
+    user := r.URL.Query().Get("user")
+    if user == "" {
+        user = r.Header.Get("X-User-ID")
+    }
+    ```
+  - In `README.md` dokumentieren, dass aus Datenschutzgründen der Header `X-User-ID` bevorzugt wird, Query-Parameter aber aus Kompatibilität unterstützt werden.
+  - Tests in `internal/api/evaluate_test.go` und `main_test.go` um einen Query-Parameter-Fall ergänzen.
 
-- `user` wird ausschließlich transient zur deterministischen Feature-Rollout-Entscheidung verarbeitet.
-- Die Kennung wird nicht persistiert, nicht in App-Logs geschrieben und nicht an Dritte weitergegeben.
-- Falls das Backend als Auftragsverarbeiter für einen aufrufenden Dienst betrieben wird, ist ein Auftragsverarbeitungsvertrag erforderlich.
-- Der Aufrufer trägt die datenschutzrechtliche Verantwortung gegenüber der betroffenen Person; das Backend selbst stellt keine Benutzeroberfläche und keine Datenschutzerklärung bereit.
-
----
-
-### DSGVO-3: Löschung und Betroffenenrechte
-**Schweregrad:** low
-
-**Datei:** `internal/store/store.go`
-
-Der Store ist ein reiner In-Memory-Store. Personenbezogene Nutzer-IDs werden darin nicht gespeichert. Damit bestehen praktisch keine gespeicherten personenbezogenen Daten, auf die Auskunfts-, Berichtigungs- oder Löschpflichten angewendet werden müssten. Das ist datenschutzfreundlich. Dennoch sollte dieser Umstand dokumentiert werden.
-
-**Konkrete Abhilfe:**  
-Im README-Abschnitt „Datenschutz & Rechtsgrundlage“ ausdrücklich ergänzen: „Es werden keine Nutzer-IDs und keine personenbezogenen Daten dauerhaft gespeichert; Betroffenenrechte sind daher auf Anwendungsebene des aufrufenden Dienstes umzusetzen.“
-
----
-
-## 2. Cyber Resilience Act (CRA)
-
-### CRA-1: Keine Authentifizierung/Autorisierung für Verwaltungsendpunkte
-**Schweregrad:** high
-
-**Datei:** `main.go`
-
-Die Routen `POST /flags`, `PUT /flags/{key}` und `DELETE /flags/{key}` sind ohne Authentifizierung oder Autorisierung registriert. Jeder, der Netzwerkzugriff auf den Dienst hat, kann Feature-Flags anlegen, verändern oder löschen. Das widerspricht den CRA-Anforderungen an Sicherheit durch Technikgestaltung und sichere Voreinstellungen (Security by design/default), weil der Standardzustand des Produkts ungeschützte Schreibzugriffe erlaubt.
-
-**Konkrete Abhilfe:**  
-Eine neue Middleware `internal/middleware/auth.go` ergänzen, die einen konfigurierbaren API-Token/Bearer-Token aus einer Umgebungsvariable (z. B. `API_TOKEN`) prüft. Mindestens alle schreibenden Routen (`POST`, `PUT`, `DELETE`) schützen; empfehlenswert ist auch der Schutz der Leserouten. In `main.go` die Middleware vor die Handler schalten, Tests in `main_test.go` ergänzen und in `README.md` einen Abschnitt „Security / Authentication“ aufnehmen.
-
----
-
-### CRA-2: Keine Transportverschlüsselung und Standardbindung an alle Interfaces
-**Schweregrad:** high
-
-**Datei:** `main.go`
-
-Der Server wird über `http.Server` ohne TLS gestartet. Die Standardadresse ist `:8080` und bindet damit an alle verfügbaren Netzwerkinterfaces. Da die Nutzer-ID über den Query-String `?user=...` übermittelt wird, kann sie bei direkter Exposition unverschlüsselt über das Netzwerk übertragen werden. Das ist weder datenschutzfreundlich noch CRA-konform.
-
-**Konkrete Abhilfe:**  
-Die Standardadresse in `main.go` von `:8080` auf `127.0.0.1:8080` ändern, damit der Dienst nicht versehentlich öffentlich lauscht. Zusätzlich entweder TLS direkt in `main.go` implementieren (`ListenAndServeTLS`) oder verbindlich in `README.md` vorschreiben, dass der Betrieb ausschließlich hinter einem TLS-terminierenden Reverse-Proxy erfolgt. Die erlaubten Betriebsarten müssen dokumentiert werden.
+### Positiv (GDPR)
+- Logging in `internal/middleware/logging.go` protokolliert ausschließlich Methode, Pfad ohne Query-String und Statuscode. `user` und `Authorization` erscheinen nicht im Log.
+- Keine Speicherung von Nutzer-IDs; `internal/evaluate/evaluate.go` verarbeitet die ID nur transient zur Hash-Berechnung.
+- Der In-Memory-Store (`internal/store/store.go`) hält ausschließlich Flag-Daten ohne Personenbezug.
 
 ---
 
-### CRA-3: Sicherheitsdokumentation und SBOM nicht sichtbar
-**Schweregrad:** medium
+## 2. EU Cyber Resilience Act (CRA)
 
-**Datei:** `README.md`, `go.mod`
+### Befund 2.1 — Kein SBOM / keine dokumentierte Update- und Patch-Strategie sichtbar
+- **Schwere:** mittel
+- **Fundstelle:** `go.mod` (nur 3 Zeilen, keine Dependencies sichtbar); keine SBOM-Datei im sichtbaren Stand. `SECURITY.md` existiert, Inhalt aber nicht einsehbar und daher nicht bewertbar.
+- **Begründung:** Für Produkte mit digitalen Elementen verlangt der CRA dokumentierte Sicherheitseigenschaften, eine Software-Stückliste (SBOM) und einen Prozess für Sicherheitsupdates. Ein reiner Standardbibliotheks-Stack minimiert das Risiko, entbindet aber nicht von der Nachweispflicht.
+- **Maßnahme (konkret):**
+  - SBOM als Datei einchecken, z. B. `sbom.cdx.json` oder `sbom.spdx.json`, erzeugt mit einem Werkzeug wie Syft oder CycloneDX. Da keine externen Abhängigkeiten sichtbar sind, genügt ein minimales SBOM mit Modul `featureflagservice`, Go-Version und „no external dependencies“.
+  - `SECURITY.md` mit mindestens folgenden Abschnitten ergänzen:
+    - Security-by-Design-Maßnahmen (Timeouts, Body-Limit, Key-Validierung, Fail-closed-Auth).
+    - Update-/Patch-Prozess: Wie wird das Binary aktualisiert? Wer ist verantwortlich?
+    - Meldung von Schwachstellen (Kontakt/Email).
+    - Bekannte Schwachstellen / Umgang mit CVEs.
 
-Der Code enthält gute technische Sicherheitsmaßnahmen (Server-Timeouts, Body-Limit, Key-Validierung, keine PII in Logs). Eine CRA-konforme Sicherheitsdokumentation und ein Software Bill of Materials (SBOM) sind im sichtbaren Stand jedoch nicht belegt. `go.mod` existiert, der vollständige Inhalt ist aber nur mit drei Zeilen angegeben; es ist nicht erkennbar, ob ein SBOM oder eine Abhängigkeitsliste dokumentiert ist.
+### Befund 2.2 — Token-Vergleich nicht konstantzeit
+- **Schwere:** mittel
+- **Fundstelle:** `internal/middleware/auth.go`, Zeile:
+  ```go
+  if !strings.HasPrefix(auth, prefix) || strings.TrimPrefix(auth, prefix) != token {
+  ```
+- **Begründung:** Der Vergleich des Bearer-Tokens mit `!=` ist nicht konstantzeit und kann Timing-Angriffe begünstigen. Der CRA verlangt Security by Design; Geheimnisvergleiche müssen zeitkonstant sein.
+- **Maßnahme (konkret):**
+  - In `internal/middleware/auth.go` `crypto/subtle.ConstantTimeCompare` verwenden:
+    ```go
+    import "crypto/subtle"
 
-**Konkrete Abhilfe:**  
-`README.md` um einen Abschnitt „Security“ ergänzen, der die umgesetzten Sicherheitseigenschaften nennt:
+    presented := strings.TrimPrefix(auth, prefix)
+    if subtle.ConstantTimeCompare([]byte(presented), []byte(token)) != 1 {
+        unauthorized(w)
+        return
+    }
+    ```
+  - Hinweis: Auch bei leerem `token` den Fail-closed-Pfad beibehalten. Falls Längen unterschiedlich sind, schlägt `ConstantTimeCompare` fehl; das ist hier korrekt.
 
-- Server-Timeouts (`ReadTimeout`, `ReadHeaderTimeout`, `WriteTimeout`, `IdleTimeout`)
-- Body-Limit von 1 MiB für schreibende Endpunkte
-- Validierung der Flag-Keys
-- Logging ohne Query-String und ohne Nutzer-IDs
-- Authentifizierungs- und TLS-Konzept nach Umsetzung der CRA-1/CRA-2-Maßnahmen
+### Befund 2.3 — Kein Rate-Limiting / Brute-Force-Schutz auf die Authentifizierung
+- **Schwere:** niedrig
+- **Fundstelle:** `main.go`, `newHandler()`: Es gibt keinen Rate-Limiter vor den geschützten Routen.
+- **Begründung:** Ohne Limitierung können Angreifer den Token durch wiederholte Anfragen brute-forcen. Für ein Backend mit statischem Bearer-Token ist das ein realistisches, wenn auch begrenztes Risiko.
+- **Maßnahme (konkret):**
+  - Optionalen einfachen Rate-Limiter je Client-IP oder pro Token in die Middleware-Kette einbauen (z. B. `golang.org/x/time/rate`; falls keine externen Dependencies gewünscht sind, einen kleinen eigenen Token-Bucket mit Mutex).
+  - Mindestens in `SECURITY.md` dokumentieren, dass ein vorgelagerter Reverse Proxy Rate-Limiting übernehmen sollte.
 
-Zusätzlich einen SBOM-Prozess einführen: `go.mod`/`go.sum` als Abhängigkeitsnachweis bestätigen oder ein SBOM im CycloneDX-/SPDX-Format erzeugen. Einen Update-/Patch-Prozess dokumentieren (z. B. Release- und Patch-Bereitstellung, Umgang mit bekannten Schwachstellen).
+### Befund 2.4 — JSON-Decoder ignoriert überschüssige Daten
+- **Schwere:** niedrig
+- **Fundstelle:** `internal/api/respond.go`, `decodeJSON`: Nach `dec.Decode(v)` wird nicht geprüft, ob weitere JSON-Daten folgen.
+- **Begründung:** Ein Request-Body wie `{...} extra` wird akzeptiert; das verstößt gegen strikte Eingabevalidierung und kann in Kombination mit Proxies zu Desynchronisierung führen.
+- **Maßnahme (konkret):**
+  - Nach dem ersten Decode prüfen:
+    ```go
+    if dec.More() {
+        writeError(w, http.StatusBadRequest, "invalid request body")
+        return errors.New("invalid request body")
+    }
+    ```
+  - Alternativ: `if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) { ... }`.
+
+### Positiv (CRA)
+- Server-Timeout-Konfiguration in `main.go` ist vorhanden und geprüft (`ReadTimeout`, `ReadHeaderTimeout`, `WriteTimeout`, `IdleTimeout`).
+- Request-Body-Limit (`maxBodyBytes = 1 << 20`) in `internal/api/respond.go` begrenzt Eingaben und antwortet mit `413`.
+- Eingabevalidierung der Flag-Keys (`validKey`) verhindert URLs außerhalb des erlaubten Zeichensatzes.
+- Fail-closed-Authentifizierung in `internal/middleware/auth.go` schließt geschützte Routen, wenn kein Token gesetzt ist.
 
 ---
 
 ## 3. EU AI Act
 
-Keine KI-Funktion im sichtbaren Code. Der Dienst führt deterministische Hash-Entscheidungen aus. Es bestehen keine Pflichten nach EU AI Act.
+- **Befund:** Keine. Es ist kein KI-System, kein GPAI-Modell und keine automatisierte Entscheidungsfindung im Sinne der KI-VO erkennbar. Der deterministische Hash (`evaluate.Decide`) ist einfache algorithmische Logik ohne KI-Komponente.
+- **Maßnahme:** Keine erforderlich.
 
 ---
 
-## 4. Pflichttexte & UI
+## 4. Pflichttexte & UI (Legal Notice, Terms, Privacy Policy, Cookie/Consent, Impressum)
 
-Nicht anwendbar. Das Produkt ist ein reines REST-Backend ohne Endnutzer-UI. Es gibt keine Impressums-, Datenschutzerklärungs-, Cookie-Banner- oder Widerrufsbelehrungspflichten auf dieser Ebene. Solche Texte muss die aufrufende Anwendung bereitstellen, nicht dieses Backend.
-
----
-
-## 5. Barrierefreiheit
-
-Nicht anwendbar. Es existiert keine öffentliche Web-UI. Die API selbst unterliegt nicht den WCAG-/BITV-/EAA-Anforderungen.
+- **Befund:** Keine unmittelbaren Pflichttexte für ein reines Backend ohne Endnutzer-UI. Es gibt keine Web-Oberfläche, keine Cookies, keinen Verkaufs-/Widerrufskontext.
+- **Empfehlung (mittel):** Die API-Dokumentation (`README.md`) sollte einen Datenschutzhinweis für API-Nutzer enthalten (siehe Befund 1.2). Ein Impressum ist nicht erforderlich, sofern kein öffentliches Angebot mit eigener UI betrieben wird.
 
 ---
 
-## Gesamtbewertung
+## 5. Barrierefreiheit (WCAG / BITV / EAA)
 
-Der Dienst erfüllt die spezifizierten funktionalen Anforderungen und die datenschutzfreundliche Logging-Vorgabe weitgehend. Es gibt keine Hinweise auf einen fundamentalen DSGVO-Verstoß wie persistente Speicherung oder Protokollierung personenbezogener Daten im Klartext. Die festgestellten Mängel sind behebbar: fehlende Authentifizierung, fehlende Transportverschlüsselung/unsichere Standardbindung und fehlende CRA-Sicherheitsdokumentation. Daher: `CHANGES_REQUESTED`.
+- **Befund:** Nicht anwendbar. Das Produkt ist eine REST-API ohne öffentliche Web-UI. Es gibt keine HTML-, CSS- oder JavaScript-Oberfläche.
+- **Maßnahme:** Keine erforderlich.
+
+---
+
+## 6. Zusammenfassung der offenen Punkte
+
+| # | Schwere | Bereich | Fundstelle | Konkrete Maßnahme |
+|---|---------|---------|------------|-------------------|
+| 1.1 | hoch | GDPR | `main.go` | TLS-Unterstützung oder verbindliche TLS-Terminierung dokumentieren/erzwingen |
+| 1.2 | mittel | GDPR | `README.md` / `COMPLIANCE.md` | Datenschutzabschnitt mit Rechtsgrundlage, Zweck, Speicherdauer, Betroffenenrechten |
+| 1.3 | hoch | AC/Marktreife | `internal/api/evaluate.go` | Query-Parameter `user` zusätzlich zu `X-User-ID` verarbeiten |
+| 2.1 | mittel | CRA | Repo / `SECURITY.md` | SBOM einchecken und Update-/Patch-Prozess dokumentieren |
+| 2.2 | mittel | CRA/Security | `internal/middleware/auth.go` | Konstante Zeit beim Token-Vergleich (`crypto/subtle`) |
+| 2.3 | niedrig | CRA/Security | `main.go` / Middleware | Rate-Limiting einbauen oder im Deployment vorschreiben |
+| 2.4 | niedrig | CRA/Inputvalidierung | `internal/api/respond.go` | Überschüssige JSON-Daten ablehnen (`dec.More()`) |
+
+**Hinweis:** Die Dateien `COMPLIANCE.md`, `SECURITY.md` und `README.md` existieren laut Dateiliste, ihre Inhalte waren jedoch nicht Teil des sichtbaren Standes. Sollten diese bereits datenschutz- und CRA-relevante Abschnitte enthalten, können einzelne Befunde entfallen; der vorgelegte Code-Stand selbst lässt die oben genannten Lücken jedoch erkennen.
