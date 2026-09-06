@@ -20,18 +20,20 @@ func main() {
 
 	logger := log.Default()
 
-	server := &http.Server{
+	logger.Printf("featureflagservice listening on %s", addr)
+	if err := newServer(addr, logger).ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Fatalf("server error: %v", err)
+	}
+}
+
+func newServer(addr string, logger *log.Logger) *http.Server {
+	return &http.Server{
 		Addr:              addr,
 		Handler:           newHandler(logger),
 		ReadTimeout:       5 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
-	}
-
-	logger.Printf("featureflagservice listening on %s", addr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Fatalf("server error: %v", err)
 	}
 }
 
