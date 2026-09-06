@@ -38,9 +38,10 @@ func TestHealthz(t *testing.T) {
 }
 
 // TestRoutesAreRegistered asserts every declared route is wired to the mux
-// under its agreed path and verb. It checks reachability (not a 404), never
-// the temporary answer of a stub handler, so it stays valid once the owning
-// tickets replace the stubs with real implementations.
+// under its agreed path and verb. A real handler may legitimately answer 404
+// (e.g. a flag key that does not exist yet), so a bare 404 alone is not proof
+// the route is missing: only the mux's own fallback ({"error":"not found"})
+// means the path was never registered.
 func TestRoutesAreRegistered(t *testing.T) {
 	h := newTestHandler(t)
 
@@ -63,7 +64,11 @@ func TestRoutesAreRegistered(t *testing.T) {
 		h.ServeHTTP(rec, req)
 
 		if rec.Code == http.StatusNotFound {
-			t.Errorf("%s %s is not registered (answered 404)", r.method, r.path)
+			var body map[string]string
+			_ = json.Unmarshal(rec.Body.Bytes(), &body)
+			if body["error"] == "not found" {
+				t.Errorf("%s %s is not registered (answered 404)", r.method, r.path)
+			}
 		}
 	}
 }

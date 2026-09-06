@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"sort"
 	"sync"
 )
 
@@ -61,6 +62,7 @@ func (s *Store) GetAll() []Flag {
 	for _, f := range s.flags {
 		flags = append(flags, f)
 	}
+	sort.Slice(flags, func(i, j int) bool { return flags[i].Key < flags[j].Key })
 	return flags
 }
 
