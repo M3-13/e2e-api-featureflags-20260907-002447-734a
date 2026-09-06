@@ -66,7 +66,11 @@ type errorWriter struct {
 }
 
 func (w *errorWriter) WriteHeader(code int) {
-	if code == http.StatusNotFound || code == http.StatusMethodNotAllowed {
+	// Only rewrite the mux's own plain-text 404/405. A handler that already
+	// prepared a JSON response (via writeJSON) sets Content-Type before
+	// WriteHeader, so its own 404/405 passes through untouched.
+	if (code == http.StatusNotFound || code == http.StatusMethodNotAllowed) &&
+		w.Header().Get("Content-Type") != "application/json" {
 		w.overridden = true
 		msg := "not found"
 		if code == http.StatusMethodNotAllowed {
