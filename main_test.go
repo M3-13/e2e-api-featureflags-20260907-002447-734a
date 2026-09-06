@@ -7,13 +7,26 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
 
+const testToken = "test-token"
+
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
-	return newHandler(log.New(io.Discard, "", 0))
+	return newHandler(log.New(io.Discard, "", 0), testToken)
+}
+
+func newTestHandlerWithToken(t *testing.T, token string) http.Handler {
+	t.Helper()
+	return newHandler(log.New(io.Discard, "", 0), token)
+}
+
+func withAuth(r *http.Request) *http.Request {
+	r.Header.Set("Authorization", "Bearer "+testToken)
+	return r
 }
 
 func TestHealthz(t *testing.T) {
@@ -59,7 +72,7 @@ func TestRoutesAreRegistered(t *testing.T) {
 	}
 
 	for _, r := range routes {
-		req := httptest.NewRequest(r.method, r.path, nil)
+		req := withAuth(httptest.NewRequest(r.method, r.path, nil))
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 
@@ -98,7 +111,7 @@ func TestWrongMethodReturns405JSON(t *testing.T) {
 // proving the server boot and health handler work at runtime, not just in
 // handler-isolation tests.
 func TestServerServesHealthz(t *testing.T) {
-	srv := newServer("127.0.0.1:0", log.New(io.Discard, "", 0))
+	srv := newServer("127.0.0.1:0", testToken, log.New(io.Discard, "", 0))
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -127,7 +140,7 @@ func TestServerServesHealthz(t *testing.T) {
 }
 
 func TestServerTimeouts(t *testing.T) {
-	srv := newServer(":8080", log.New(io.Discard, "", 0))
+	srv := newServer(":8080", testToken, log.New(io.Discard, "", 0))
 	if srv.ReadTimeout != 5*time.Second {
 		t.Errorf("ReadTimeout = %v, want 5s", srv.ReadTimeout)
 	}
@@ -159,5 +172,117 @@ func TestUnknownPathReturns404JSON(t *testing.T) {
 	}
 	if body["error"] == "" {
 		t.Fatalf("404 body has no error field: %v", body)
+	}
+}
+
+var protectedRoutes = []struct {
+	method string
+	path   string
+}{
+	{http.MethodPost, "/flags"},
+	{http.MethodGet, "/flags"},
+	{http.MethodGet, "/flags/example"},
+	{http.MethodPut, "/flags/example"},
+	{http.MethodDelete, "/flags/example"},
+	{http.MethodGet, "/flags/example/evaluate"},
+}
+
+// TestHealthzOpenWithoutToken asserts /healthz stays reachable even when no
+// token is configured at all (the fail-closed degradation must not lock the
+// health probe out).
+func TestHealthzOpenWithoutToken(t *testing.T) {
+	h := newTestHandlerWithToken(t, "")
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /healthz status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestProtectedRoutesRejectWithoutToken(t *testing.T) {
+	for _, r := range protectedRoutes {
+		h := newTestHandlerWithToken(t, testToken)
+
+		req := httptest.NewRequest(r.method, r.path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s without token status = %d, want %d", r.method, r.path, rec.Code, http.StatusUnauthorized)
+			continue
+		}
+		assertUnauthorizedBody(t, r.method, r.path, rec.Body.Bytes())
+	}
+}
+
+func TestProtectedRoutesRejectEmptyToken(t *testing.T) {
+	h := newTestHandlerWithToken(t, "")
+
+	for _, r := range protectedRoutes {
+		req := httptest.NewRequest(r.method, r.path, nil)
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s with empty configured token status = %d, want %d", r.method, r.path, rec.Code, http.StatusUnauthorized)
+			continue
+		}
+		assertUnauthorizedBody(t, r.method, r.path, rec.Body.Bytes())
+	}
+}
+
+func TestProtectedRoutesRejectWrongToken(t *testing.T) {
+	for _, r := range protectedRoutes {
+		h := newTestHandlerWithToken(t, testToken)
+
+		req := httptest.NewRequest(r.method, r.path, nil)
+		req.Header.Set("Authorization", "Bearer wrong-token")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s with wrong token status = %d, want %d", r.method, r.path, rec.Code, http.StatusUnauthorized)
+			continue
+		}
+		assertUnauthorizedBody(t, r.method, r.path, rec.Body.Bytes())
+	}
+}
+
+func assertUnauthorizedBody(t *testing.T, method, path string, body []byte) {
+	t.Helper()
+	var parsed map[string]string
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Errorf("%s %s 401 body is not valid JSON: %v", method, path, err)
+		return
+	}
+	if parsed["error"] != "unauthorized" {
+		t.Errorf("%s %s 401 body error = %q, want %q", method, path, parsed["error"], "unauthorized")
+	}
+	if s := string(body); strings.Contains(s, "Bearer") || strings.Contains(s, "test-token") {
+		t.Errorf("%s %s 401 body leaks the token: %q", method, path, s)
+	}
+}
+
+func TestProtectedRoutesAllowCorrectToken(t *testing.T) {
+	h := newTestHandlerWithToken(t, testToken)
+
+	createReq := withAuth(httptest.NewRequest(http.MethodPost, "/flags",
+		strings.NewReader(`{"key":"alpha","enabled":true}`)))
+	createReq.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, createReq)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /flags with token status = %d, want %d", rec.Code, http.StatusCreated)
+	}
+
+	listReq := withAuth(httptest.NewRequest(http.MethodGet, "/flags", nil))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, listReq)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /flags with token status = %d, want %d", rec.Code, http.StatusOK)
 	}
 }

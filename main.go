@@ -15,21 +15,23 @@ import (
 func main() {
 	addr := os.Getenv("ADDR")
 	if addr == "" {
-		addr = ":8080"
+		addr = "127.0.0.1:8080"
 	}
+
+	token := os.Getenv("FLAG_API_TOKEN")
 
 	logger := log.Default()
 
 	logger.Printf("featureflagservice listening on %s", addr)
-	if err := newServer(addr, logger).ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := newServer(addr, token, logger).ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Fatalf("server error: %v", err)
 	}
 }
 
-func newServer(addr string, logger *log.Logger) *http.Server {
+func newServer(addr string, token string, logger *log.Logger) *http.Server {
 	return &http.Server{
 		Addr:              addr,
-		Handler:           newHandler(logger),
+		Handler:           newHandler(logger, token),
 		ReadTimeout:       5 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -37,18 +39,19 @@ func newServer(addr string, logger *log.Logger) *http.Server {
 	}
 }
 
-func newHandler(logger *log.Logger) http.Handler {
+func newHandler(logger *log.Logger, token string) http.Handler {
 	s := store.NewStore()
 	handlers := api.NewHandlers(s)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handlers.Healthz)
-	mux.HandleFunc("POST /flags", handlers.CreateFlag)
-	mux.HandleFunc("GET /flags", handlers.ListFlags)
-	mux.HandleFunc("GET /flags/{key}", handlers.GetFlag)
-	mux.HandleFunc("PUT /flags/{key}", handlers.UpdateFlag)
-	mux.HandleFunc("DELETE /flags/{key}", handlers.DeleteFlag)
-	mux.HandleFunc("GET /flags/{key}/evaluate", handlers.EvaluateFlag)
+
+	mux.Handle("POST /flags", middleware.Auth(token, http.HandlerFunc(handlers.CreateFlag)))
+	mux.Handle("GET /flags", middleware.Auth(token, http.HandlerFunc(handlers.ListFlags)))
+	mux.Handle("GET /flags/{key}", middleware.Auth(token, http.HandlerFunc(handlers.GetFlag)))
+	mux.Handle("PUT /flags/{key}", middleware.Auth(token, http.HandlerFunc(handlers.UpdateFlag)))
+	mux.Handle("DELETE /flags/{key}", middleware.Auth(token, http.HandlerFunc(handlers.DeleteFlag)))
+	mux.Handle("GET /flags/{key}/evaluate", middleware.Auth(token, http.HandlerFunc(handlers.EvaluateFlag)))
 
 	return middleware.Logging(logger, jsonErrorHandler(mux))
 }

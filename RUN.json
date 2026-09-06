@@ -8,7 +8,13 @@
       "kind": "server",
       "start": ["go", "run", "."],
       "port": 8080,
-      "health": { "path": "/healthz", "expect_status": [200] }
+      "health": { "path": "/healthz", "expect_status": [200] },
+      "env": {
+        "FLAG_API_TOKEN": {
+          "external": true,
+          "degraded_without": "protected /flags routes answer 401 (fail-closed); /healthz stays reachable"
+        }
+      }
     }
   ]
 }
